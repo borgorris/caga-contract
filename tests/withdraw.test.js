@@ -55,9 +55,10 @@ describe("Withdraw", function () {
 		});
 	});
 
-	describe("protocol_withdraw", function () {
+	describe("protocolWithdraw", function () {
 		it("should revert if called by a non-protocol", async function () {
-			await expect(withdraw.connect(account3).protocol_withdraw(1000)).to.be.revertedWith("caller is not the protocol");
+			await expect(withdraw.connect(account3).protocolWithdraw(1000, account3.address))
+				.to.be.revertedWith("caller is not the protocol");
 		});
 	});
 });
