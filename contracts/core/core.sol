@@ -25,6 +25,7 @@ contract Core is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, Cor
 	event Stake_Validator(uint256 amount);
 	event Unstake_Validator(uint256 full_amount, uint256 shortfall, uint256 validators_to_unstake);
 	event Deposit_Validator(uint256 amount, uint256 validator_index);
+	event FallbackInvoked(address sender, uint amount);
 
 	function initialize(address ls_token, address withdraw_contract, address abyss_eth2_depositor) public initializer {
 		__Ownable_init();
@@ -46,6 +47,10 @@ contract Core is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, Cor
 	receive() external payable {
 		require(_msgSender() == _state.contracts.withdraw, "invalid sender");
 	}
+
+	fallback() external payable {
+		emit FallbackInvoked(msg.sender, msg.value);
+	}	
 
 	modifier onlyOperator() {
 		require(_msgSender() == _state.operator, "caller is not the operator");
@@ -96,52 +101,46 @@ contract Core is Initializable, UUPSUpgradeable, ReentrancyGuardUpgradeable, Cor
 	}
 
 	function request_withdraw(uint256 amount) external nonReentrant {
-		require(amount > 0, "withdraw amount must be greater than 0");
-		require(i_ls_token(_state.contracts.ls_token).balanceOf(_msgSender()) >= amount, "insufficient balance");
-		require(_state.withdrawals.withdraw_account[_msgSender()] == 0, "previous withdrawal request not claimed");
+		require(amount > 0, "Withdraw amount must be greater than 0");
+		address sender = _msgSender();
+		uint256 balanceOfSender = i_ls_token(_state.contracts.ls_token).balanceOf(sender);
+		require(balanceOfSender >= amount, "Insufficient balance");
+		require(_state.withdrawals.withdraw_account[sender] == 0, "Previous withdrawal request not claimed");
 
 		uint256 withdraw_amount = calculate_withdraw(amount);
-		uint256 core_withdraw_eth;
-		if (_state.withdrawals.withdraw_total > (address(this).balance + _state.contracts.withdraw.balance)) {
-			core_withdraw_eth = 0;
+		uint256 currentBalance = address(this).balance;
+		uint256 withdrawContractBalance = address(_state.contracts.withdraw).balance;
+		uint256 coreWithdrawEth = currentBalance + withdrawContractBalance - _state.withdrawals.withdraw_total;
+
+		emit Withdraw_Request(sender, withdraw_amount);
+
+		if (withdraw_amount > coreWithdrawEth) {
+			uint256 shortfall = withdraw_amount - coreWithdrawEth;
+			uint256 unstake_validators = shortfall / _state.constants.validator_capacity + (shortfall % _state.constants.validator_capacity > 0 ? 1 : 0);
+			_state.withdrawals.withdraw_account[sender] += withdraw_amount;
+			_state.withdrawals.withdraw_total += withdraw_amount;
+			_state.withdrawals.unstaked_validators += unstake_validators;
+			_state.total_deposits -= withdraw_amount;
+
+			i_ls_token(_state.contracts.ls_token).burnFrom(sender, amount);
+
+			emit Unstake_Validator(withdraw_amount, shortfall, unstake_validators);
 		} else {
-			core_withdraw_eth = address(this).balance + _state.contracts.withdraw.balance - _state.withdrawals.withdraw_total;
-		}
-
-		emit Withdraw_Request(_msgSender(), withdraw_amount);
-
-		// core contract does not have enough ETH to process withdrawal request
-		if (withdraw_amount > address(this).balance) {
-			// both core and withdraw contract does not have enough ETH to process this withdrawal request (need to unwind from validator)
-			if (withdraw_amount > core_withdraw_eth) {
-				_state.withdrawals.withdraw_account[_msgSender()] += withdraw_amount;
-				_state.withdrawals.withdraw_total += withdraw_amount;
-				uint256 unstake_validators = (withdraw_amount - core_withdraw_eth) / _state.constants.validator_capacity;
-				if ((withdraw_amount - core_withdraw_eth) % _state.constants.validator_capacity > 0) unstake_validators++;
-				_state.withdrawals.unstaked_validators += unstake_validators;
-
-				_state.total_deposits -= withdraw_amount;
-				i_ls_token(_state.contracts.ls_token).burnFrom(_msgSender(), amount);
-
-				emit Unstake_Validator(withdraw_amount, withdraw_amount - core_withdraw_eth, unstake_validators);
-
-				return;
-			} else {
-				// core + withdraw contract has enough ETH to process withdrawal request
-				// so we move unstaked ETH from withdraw contract to core contract
-				// as withdrawals funds should never be processed from the withdraw contract
+			if (withdraw_amount > currentBalance) {
 				_withdraw_unstaked();
 			}
+			_distribute_rewards();
+
+			_state.total_deposits -= withdraw_amount;
+			i_ls_token(_state.contracts.ls_token).burnFrom(sender, amount);
+
+			(bool success, ) = sender.call{value: withdraw_amount}("");
+			require(success, "ETH transfer failed");
+
+			emit Withdraw_Claim(sender, withdraw_amount);
 		}
-		// only core contract funds should be used to process withdrawal requests
-		_distribute_rewards();
-		_state.total_deposits -= withdraw_amount;
-
-		i_ls_token(_state.contracts.ls_token).burnFrom(_msgSender(), amount);
-		payable(_msgSender()).transfer(withdraw_amount);
-
-		emit Withdraw_Claim(_msgSender(), withdraw_amount);
 	}
+
 
 	function claim_withdrawal() external nonReentrant {
 		uint256 withdraw_amount = _state.withdrawals.withdraw_account[_msgSender()];

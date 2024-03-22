@@ -34,9 +34,11 @@ contract Withdraw is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 		protocol = new_protocol;
 	}
 
-	function protocol_withdraw(uint256 amount) external onlyProtocol {
-		if (amount > 0 && address(this).balance >= 0) {
-			payable(protocol).transfer(amount);
-		}
-	}
+   function protocolWithdraw(uint256 amount, address payable recipient) external onlyProtocol {
+        require(amount > 0, "Amount must be greater than 0");
+        require(address(this).balance >= amount, "Insufficient balance");
+        require(recipient != address(0), "Recipient address cannot be 0");
+
+        recipient.transfer(amount);
+    }
 }
